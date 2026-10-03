@@ -3,52 +3,72 @@ name: Build
 on:
   workflow_dispatch:
     inputs:
-      ubuntu_24_04:
-        description: 'Linux / Ubuntu 24.04'
-        type: boolean
-        default: true
-      ubuntu_24_04_arm:
-        description: 'Linux / Ubuntu 24.04 ARM64'
+      ubuntu_latest:
+        description: 'Linux / Ubuntu latest (24.04 today) - label moves later'
         type: boolean
         default: false
+      ubuntu_24_04:
+        description: 'Linux / Ubuntu 24.04 - no end date yet'
+        type: boolean
+        default: true
       ubuntu_22_04:
-        description: 'Linux / Ubuntu 22.04 (retires Apr 2027)'
+        description: 'Linux / Ubuntu 22.04 - ends 17 Apr 2027'
         type: boolean
         default: false
       ubuntu_26_04:
-        description: 'Linux / Ubuntu 26.04 (preview)'
+        description: 'Linux / Ubuntu 26.04 (preview) - no end date yet'
+        type: boolean
+        default: false
+      ubuntu_24_04_arm:
+        description: 'Linux / Ubuntu 24.04 ARM64 - no end date yet'
+        type: boolean
+        default: false
+      ubuntu_22_04_arm:
+        description: 'Linux / Ubuntu 22.04 ARM64 - ends 17 Apr 2027'
+        type: boolean
+        default: false
+      ubuntu_26_04_arm:
+        description: 'Linux / Ubuntu 26.04 ARM64 (preview) - no end date yet'
         type: boolean
         default: false
       windows_latest:
-        description: 'Windows / Server 2025 (latest)'
+        description: 'Windows / Server 2025 (latest) - no end date yet'
+        type: boolean
+        default: false
+      windows_2025:
+        description: 'Windows / Server 2025 (same machine as latest) - no end date yet'
         type: boolean
         default: false
       windows_2022:
-        description: 'Windows / Server 2022'
+        description: 'Windows / Server 2022 - no end date yet'
         type: boolean
         default: false
       windows_11_arm:
-        description: 'Windows / 11 ARM64'
+        description: 'Windows / 11 ARM64 - no end date yet'
+        type: boolean
+        default: false
+      macos_latest:
+        description: 'macOS / latest (26 today, Apple Silicon) - label moves later'
         type: boolean
         default: false
       macos_26:
-        description: 'macOS / 26 Apple Silicon'
+        description: 'macOS / 26 Apple Silicon - no end date yet'
         type: boolean
         default: false
       macos_15:
-        description: 'macOS / 15 Apple Silicon'
+        description: 'macOS / 15 Apple Silicon - no end date yet'
         type: boolean
         default: false
       macos_14:
-        description: 'macOS / 14 Apple Silicon'
+        description: 'macOS / 14 Apple Silicon - ends 2 Nov 2026'
         type: boolean
         default: false
       macos_26_intel:
-        description: 'macOS / 26 Intel'
+        description: 'macOS / 26 Intel - no end date yet'
         type: boolean
         default: false
       macos_15_intel:
-        description: 'macOS / 15 Intel'
+        description: 'macOS / 15 Intel - no end date yet'
         type: boolean
         default: false
 
@@ -69,13 +89,18 @@ jobs:
           python3 - << 'PY'
           import json, os
           labels = {
+              "ubuntu_latest": "ubuntu-latest",
               "ubuntu_24_04": "ubuntu-24.04",
-              "ubuntu_24_04_arm": "ubuntu-24.04-arm",
               "ubuntu_22_04": "ubuntu-22.04",
               "ubuntu_26_04": "ubuntu-26.04",
+              "ubuntu_24_04_arm": "ubuntu-24.04-arm",
+              "ubuntu_22_04_arm": "ubuntu-22.04-arm",
+              "ubuntu_26_04_arm": "ubuntu-26.04-arm",
               "windows_latest": "windows-latest",
+              "windows_2025": "windows-2025",
               "windows_2022": "windows-2022",
               "windows_11_arm": "windows-11-arm",
+              "macos_latest": "macos-latest",
               "macos_26": "macos-26",
               "macos_15": "macos-15",
               "macos_14": "macos-14",
