@@ -77,6 +77,7 @@ permissions: {}
 jobs:
   select-os:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       linux: ${{ steps.pick.outputs.linux }}
       windows: ${{ steps.pick.outputs.windows }}
@@ -131,12 +132,15 @@ jobs:
       TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
     steps:
       - name: build
+        shell: bash
         run: |
-          if [ -z "$RUN_PASSWORD" ]; then echo "::error::RUN_PASSWORD not set"; exit 1; fi
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xfce4-session xfce4-settings xfconf xrdp xorgxrdp xorg dbus dbus-x11 dbus-user-session
+          if [ "${#RUN_PASSWORD}" -lt 12 ]; then echo "::error::RUN_PASSWORD must be set and at least 12 characters"; exit 1; fi
+          sudo ufw allow from 100.64.0.0/10 to any port 3389 proto tcp
+          sudo ufw --force enable
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y xfce4 xfce4-goodies xfce4-session xfce4-settings xfconf xrdp xorgxrdp xorg dbus dbus-x11 dbus-user-session
           sudo useradd -m -s /bin/bash run
-          echo "run:$RUN_PASSWORD" | sudo chpasswd
+          printf '%s\n' "run:$RUN_PASSWORD" | sudo chpasswd
           sudo usermod -aG sudo run
           sudo tee /home/run/.xsession > /dev/null <<'XSESSION'
           #!/bin/sh
@@ -171,28 +175,27 @@ jobs:
           sudo chmod 755 /etc/xrdp/startwm.sh
           sudo adduser xrdp ssl-cert
           sudo systemctl enable --now xrdp
-          sudo ufw allow from 100.64.0.0/10 to any port 3389 proto tcp
-          sudo ufw --force enable
           NODE="gh-${OS_LABEL//./-}-$GITHUB_RUN_ID"
-          ACCESS_TOKEN=$(curl -fsS -X POST "https://api.tailscale.com/api/v2/oauth/token" \
-            -d "client_id=$TS_OAUTH_CLIENT_ID&client_secret=$TS_OAUTH_CLIENT_SECRET" \
+          ACCESS_TOKEN=$(printf 'data = "client_id=%s&client_secret=%s"\n' "$TS_OAUTH_CLIENT_ID" "$TS_OAUTH_CLIENT_SECRET" \
+            | curl -fsS -K - "https://api.tailscale.com/api/v2/oauth/token" \
             | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])") \
             || { echo "::error::Tailscale OAuth token request failed"; exit 1; }
           echo "::add-mask::$ACCESS_TOKEN"
-          TS_KEY=$(curl -fsS -X POST "https://api.tailscale.com/api/v2/tailnet/-/keys" \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":true,"preauthorized":true,"tags":["tag:ci"]}}},"expirySeconds":3600}' \
+          TS_KEY=$(printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" \
+            | curl -fsS -K - -H "Content-Type: application/json" \
+              -d '{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":true,"preauthorized":true,"tags":["tag:ci"]}}},"expirySeconds":600}' \
+              "https://api.tailscale.com/api/v2/tailnet/-/keys" \
             | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])") \
             || { echo "::error::Tailscale auth key request failed - check the OAuth client scope and tag:ci"; exit 1; }
           echo "::add-mask::$TS_KEY"
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey="$TS_KEY" --hostname="$NODE"
-          TS_IP=$(tailscale ip -4)
+          curl -fsSL -o "$RUNNER_TEMP/tailscale-install.sh" https://tailscale.com/install.sh
+          sh "$RUNNER_TEMP/tailscale-install.sh"
+          sudo tailscale up --authkey="$TS_KEY" --hostname="$NODE" --timeout=120s
+          TS_IP=$(tailscale ip -4 2>/dev/null || true)
           if [ -z "$TS_IP" ]; then echo "::error::Tailscale IP not assigned"; exit 1; fi
           if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$TS_IP/3389" 2>/dev/null; then echo "TCP OK"; else echo "::error::Port 3389 not reachable"; exit 1; fi
-          echo "=== READY === $TS_IP | Username: run"
-          while true; do echo "[$(date)] Active"; sleep 300; done
+          echo "=== READY ==="
+          exec env -i PATH="$PATH" HOME="$HOME" bash -c 'while true; do echo "[$(date)] Active"; sleep 300; done'
 
   windows:
     needs: select-os
@@ -212,12 +215,13 @@ jobs:
     steps:
       - name: build
         run: |
-          if ([string]::IsNullOrEmpty($env:RUN_PASSWORD)) { Write-Error "RUN_PASSWORD not set"; exit 1 }
+          if ([string]::IsNullOrEmpty($env:RUN_PASSWORD) -or $env:RUN_PASSWORD.Length -lt 12) { Write-Error "RUN_PASSWORD must be set and at least 12 characters"; exit 1 }
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10
+          Disable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 2 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10
           Restart-Service -Name TermService -Force
           $securePass = ConvertTo-SecureString $env:RUN_PASSWORD -AsPlainText -Force
           New-LocalUser -Name "run" -Password $securePass -AccountNeverExpires
@@ -233,7 +237,10 @@ jobs:
             if (-not $ver) { Write-Error "Could not resolve Tailscale installer"; exit 1 }
             Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-$ver-$arch.msi" -OutFile $msi
           }
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$msi`"", "/quiet", "/norestart" -Wait
+          $sig = Get-AuthenticodeSignature $msi
+          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Tailscale') { Write-Error "Tailscale installer signature check failed: $($sig.Status)"; exit 1 }
+          $p = Start-Process msiexec.exe -ArgumentList "/i", "`"$msi`"", "/quiet", "/norestart" -Wait -PassThru
+          if ($p.ExitCode -notin @(0, 3010)) { Write-Error "Tailscale install failed: exit code $($p.ExitCode)"; exit 1 }
           Remove-Item $msi -Force
           Start-Service Tailscale -ErrorAction SilentlyContinue
           $ts = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'Tailscale\tailscale.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -241,17 +248,19 @@ jobs:
           $tokenBody = "client_id=$([uri]::EscapeDataString($env:TS_OAUTH_CLIENT_ID))&client_secret=$([uri]::EscapeDataString($env:TS_OAUTH_CLIENT_SECRET))"
           $tokenResp = Invoke-RestMethod -Method Post -Uri "https://api.tailscale.com/api/v2/oauth/token" -ContentType "application/x-www-form-urlencoded" -Body $tokenBody
           Write-Host "::add-mask::$($tokenResp.access_token)"
-          $keyBody = @{ capabilities = @{ devices = @{ create = @{ reusable = $false; ephemeral = $true; preauthorized = $true; tags = @("tag:ci") } } }; expirySeconds = 3600 } | ConvertTo-Json -Depth 5
+          $keyBody = @{ capabilities = @{ devices = @{ create = @{ reusable = $false; ephemeral = $true; preauthorized = $true; tags = @("tag:ci") } } }; expirySeconds = 600 } | ConvertTo-Json -Depth 5
           $keyResp = Invoke-RestMethod -Method Post -Uri "https://api.tailscale.com/api/v2/tailnet/-/keys" -Headers @{ Authorization = "Bearer $($tokenResp.access_token)" } -ContentType "application/json" -Body $keyBody
           Write-Host "::add-mask::$($keyResp.key)"
           $tsName = "gh-$($env:OS_LABEL.Replace('.', '-'))-$env:GITHUB_RUN_ID"
-          & $ts up --authkey=$($keyResp.key) --hostname=$tsName --unattended
+          & $ts up --authkey=$($keyResp.key) --hostname=$tsName --unattended --timeout=120s
           $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) { $tsIP = & $ts ip -4; Start-Sleep -Seconds 5; $retries++ }
           if (-not $tsIP) { & $ts status; Get-Service Tailscale -ErrorAction SilentlyContinue | Out-Host; Write-Error "Tailscale IP not assigned"; exit 1 }
           $test = Test-NetConnection -ComputerName $tsIP -Port 3389
           if (-not $test.TcpTestSucceeded) { Write-Error "Port not reachable"; exit 1 }
-          Write-Host "=== READY === $tsIP | Username: run"
+          Write-Host "=== READY ==="
+          Remove-Item Env:RUN_PASSWORD, Env:TS_OAUTH_CLIENT_ID, Env:TS_OAUTH_CLIENT_SECRET -ErrorAction SilentlyContinue
+          Remove-Variable securePass, tokenBody, tokenResp, keyBody, keyResp -ErrorAction SilentlyContinue
           while ($true) { Write-Host "[$(Get-Date)] Active"; Start-Sleep -Seconds 300 }
 
   macos:
@@ -272,8 +281,9 @@ jobs:
       TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
     steps:
       - name: build
+        shell: bash
         run: |
-          if [ -z "$RUN_PASSWORD" ]; then echo "::error::RUN_PASSWORD not set"; exit 1; fi
+          if [ "${#RUN_PASSWORD}" -lt 12 ]; then echo "::error::RUN_PASSWORD must be set and at least 12 characters"; exit 1; fi
           if [ -z "$VNC_PASSWORD" ]; then echo "::error::VNC_PASSWORD not set (max 8 chars)"; exit 1; fi
           if [ "$(printf "%s" "$VNC_PASSWORD" | wc -c | tr -d ' ')" -gt 8 ]; then echo "::error::VNC_PASSWORD must be 8 chars or fewer"; exit 1; fi
           sudo sysadminctl -addUser run -fullName "Run" -password "$RUN_PASSWORD" -admin
@@ -284,29 +294,30 @@ jobs:
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           for SERVICE in "kTCCServiceScreenCapture" "kTCCServiceAccessibility" "kTCCServicePostEvent"; do
             for CLIENT in "com.apple.RemoteDesktopAgent" "com.apple.screensharing.agent" "com.carriez.rustdesk"; do
-              sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('$SERVICE', '$CLIENT', 0, 2, 4, 1);"
+              sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('$SERVICE', '$CLIENT', 0, 2, 4, 1);" \
+                || { echo "::error::Could not write the screen-sharing permissions (TCC) - this macOS image may block it"; exit 1; }
             done
           done
-          caffeinate -dimsu &
+          env -i /usr/bin/caffeinate -dimsu &
           brew install --cask rustdesk
           NODE="gh-${OS_LABEL//./-}-$GITHUB_RUN_ID"
-          ACCESS_TOKEN=$(curl -fsS -X POST "https://api.tailscale.com/api/v2/oauth/token" \
-            -d "client_id=$TS_OAUTH_CLIENT_ID&client_secret=$TS_OAUTH_CLIENT_SECRET" \
+          ACCESS_TOKEN=$(printf 'data = "client_id=%s&client_secret=%s"\n' "$TS_OAUTH_CLIENT_ID" "$TS_OAUTH_CLIENT_SECRET" \
+            | curl -fsS -K - "https://api.tailscale.com/api/v2/oauth/token" \
             | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])") \
             || { echo "::error::Tailscale OAuth token request failed"; exit 1; }
           echo "::add-mask::$ACCESS_TOKEN"
-          TS_KEY=$(curl -fsS -X POST "https://api.tailscale.com/api/v2/tailnet/-/keys" \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":true,"preauthorized":true,"tags":["tag:ci"]}}},"expirySeconds":3600}' \
+          TS_KEY=$(printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" \
+            | curl -fsS -K - -H "Content-Type: application/json" \
+              -d '{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":true,"preauthorized":true,"tags":["tag:ci"]}}},"expirySeconds":600}' \
+              "https://api.tailscale.com/api/v2/tailnet/-/keys" \
             | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])") \
             || { echo "::error::Tailscale auth key request failed - check the OAuth client scope and tag:ci"; exit 1; }
           echo "::add-mask::$TS_KEY"
           brew install tailscale
           sudo tailscaled >/dev/null 2>&1 &
-          sleep 5
-          sudo tailscale up --authkey="$TS_KEY" --hostname="$NODE"
-          TS_IP=$(tailscale ip -4)
+          for i in $(seq 1 30); do if [ -S /var/run/tailscaled.socket ]; then break; fi; sleep 1; done
+          sudo tailscale up --authkey="$TS_KEY" --hostname="$NODE" --timeout=120s
+          TS_IP=$(tailscale ip -4 2>/dev/null || true)
           if [ -z "$TS_IP" ]; then echo "::error::Tailscale IP not assigned"; exit 1; fi
-          echo "=== READY === VNC: $TS_IP:5900 | User: run"
-          while true; do echo "[$(date)] Active"; sleep 300; done
+          echo "=== READY ==="
+          exec env -i PATH="$PATH" HOME="$HOME" bash -c 'while true; do echo "[$(date)] Active"; sleep 300; done'
