@@ -1,4 +1,5 @@
 name: Build
+
 on:
   workflow_dispatch:
     inputs:
@@ -70,7 +71,9 @@ on:
         description: 'macOS / 15 Intel - no end date yet'
         type: boolean
         default: false
+
 permissions: {}
+
 jobs:
   select-os:
     runs-on: ubuntu-24.04
@@ -111,6 +114,7 @@ jobs:
               for output, prefix in (("linux", "ubuntu"), ("windows", "windows"), ("macos", "macos")):
                   out.write(output + "=" + json.dumps([x for x in picked if x.startswith(prefix)]) + "\n")
           PY
+
   linux:
     needs: select-os
     if: needs.select-os.outputs.linux != '[]'
@@ -131,33 +135,46 @@ jobs:
         shell: bash
         run: |
           if [ "${#RUN_PASSWORD}" -lt 12 ]; then echo "::error::RUN_PASSWORD must be set and at least 12 characters"; exit 1; fi
-          RD_TAG=$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/rustdesk/rustdesk/releases/latest || true)
-          RD_TAG=${RD_TAG##*/}
-          case "$RD_TAG" in [0-9]*.[0-9]*.[0-9]*) ;; *) RD_TAG=1.5.0 ;; esac
-          curl -fsSL -o /tmp/rustdesk.deb "https://github.com/rustdesk/rustdesk/releases/download/$RD_TAG/rustdesk-$RD_TAG-$(uname -m).deb" \
-            || { echo "::error::Could not download RustDesk $RD_TAG"; exit 1; }
-          sudo ufw allow from 100.64.0.0/10 to any port 21118 proto tcp
+          sudo ufw allow from 100.64.0.0/10 to any port 3389 proto tcp
           sudo ufw --force enable
           sudo apt-get -o Acquire::Retries=3 update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends cinnamon gnome-terminal xvfb libgl1-mesa-dri librsvg2-common adwaita-icon-theme dbus dbus-x11 dbus-user-session /tmp/rustdesk.deb
-          sudo systemctl disable --now rustdesk || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y xfce4 xfce4-goodies xfce4-session xfce4-settings xfconf xrdp xorgxrdp xorg dbus dbus-x11 dbus-user-session
           sudo useradd -m -s /bin/bash run
           printf '%s\n' "run:$RUN_PASSWORD" | sudo chpasswd
           sudo usermod -aG sudo run
-          sudo install -d -m 1777 /tmp/.X11-unix
-          sudo install -d -o run -g run -m 700 /tmp/xdg-run
-          UENV=(HOME=/home/run USER=run LOGNAME=run SHELL=/bin/bash LANG=C.UTF-8 PATH="$PATH" XDG_RUNTIME_DIR=/tmp/xdg-run XDG_SESSION_TYPE=x11 DISPLAY=:99)
-          sudo -u run env -i "${UENV[@]}" Xvfb :99 -screen 0 1280x720x24 -nolisten tcp > /tmp/xvfb.log 2>&1 &
-          for i in $(seq 1 30); do if [ -S /tmp/.X11-unix/X99 ]; then break; fi; sleep 1; done
-          if [ ! -S /tmp/.X11-unix/X99 ]; then echo "::error::Xvfb did not start"; cat /tmp/xvfb.log; exit 1; fi
-          DBUS=$(sudo -u run env -i "${UENV[@]}" dbus-daemon --session --fork --print-address)
-          if [ -z "$DBUS" ]; then echo "::error::D-Bus session did not start"; exit 1; fi
-          UENV+=(DBUS_SESSION_BUS_ADDRESS="$DBUS")
-          sudo -u run env -i "${UENV[@]}" cinnamon-session-cinnamon > /tmp/cinnamon.log 2>&1 &
-          DESKTOP_UP=no
-          for i in $(seq 1 60); do if [ "$(sudo -u run env -i "${UENV[@]}" gdbus call --session --dest org.Cinnamon --object-path /org/Cinnamon --method org.Cinnamon.GetRunState 2>/dev/null || true)" = "(2,)" ]; then DESKTOP_UP=yes; break; fi; sleep 3; done
-          if [ "$DESKTOP_UP" != yes ]; then echo "::error::Cinnamon did not start"; tail -n 40 /tmp/cinnamon.log; exit 1; fi
-          sudo -u run env -i "${UENV[@]}" rustdesk --server > /tmp/rustdesk.log 2>&1 &
+          sudo tee /home/run/.xsession > /dev/null <<'XSESSION'
+          #!/bin/sh
+          export XDG_CONFIG_DIRS=/etc:/etc/xdg
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_CACHE_HOME="$HOME/.cache"
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          exec /usr/bin/startxfce4
+          XSESSION
+          sudo chown run:run /home/run/.xsession
+          sudo chmod +x /home/run/.xsession
+          sudo tee /etc/xrdp/startwm.sh > /dev/null <<'STARTWM'
+          #!/bin/sh
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          export XDG_CONFIG_DIRS=/etc:/etc/xdg
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
+          if [ -r /etc/profile ]; then . /etc/profile; fi
+          if [ -r "$HOME/.profile" ]; then . "$HOME/.profile"; fi
+          export XDG_CONFIG_DIRS=/etc:/etc/xdg
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
+          exec "$HOME/.xsession"
+          STARTWM
+          sudo chmod 755 /etc/xrdp/startwm.sh
+          sudo adduser xrdp ssl-cert
+          sudo systemctl enable --now xrdp
           NODE="gh-${OS_LABEL//./-}-$GITHUB_RUN_ID"
           ACCESS_TOKEN=$(printf 'data = "client_id=%s&client_secret=%s"\n' "$TS_OAUTH_CLIENT_ID" "$TS_OAUTH_CLIENT_SECRET" \
             | curl -fsS -K - "https://api.tailscale.com/api/v2/oauth/token" \
@@ -176,22 +193,10 @@ jobs:
           sudo tailscale up --authkey="$TS_KEY" --hostname="$NODE" --timeout=120s
           TS_IP=$(tailscale ip -4 2>/dev/null || true)
           if [ -z "$TS_IP" ]; then echo "::error::Tailscale IP not assigned"; exit 1; fi
-          for i in $(seq 1 60); do
-            RD_OUT=$(sudo rustdesk --password "$RUN_PASSWORD" 2>&1 || true)
-            case "$RD_OUT" in *Done!*) break ;; esac
-            sleep 3
-          done
-          case "$RD_OUT" in *Done!*) ;; *) echo "::error::RustDesk did not accept the password: $RD_OUT"; tail -n 40 /tmp/rustdesk.log; exit 1 ;; esac
-          sudo rustdesk --option direct-server Y
-          sudo rustdesk --option whitelist 100.64.0.0/10
-          sudo rustdesk --option verification-method use-permanent-password
-          sudo rustdesk --option approve-mode password
-          RD_UP=no
-          for i in $(seq 1 30); do if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$TS_IP/21118" 2>/dev/null; then RD_UP=yes; break; fi; sleep 2; done
-          if [ "$RD_UP" != yes ]; then echo "::error::RustDesk port 21118 not reachable"; tail -n 40 /tmp/rustdesk.log; exit 1; fi
-          echo "TCP OK"
+          if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$TS_IP/3389" 2>/dev/null; then echo "TCP OK"; else echo "::error::Port 3389 not reachable"; exit 1; fi
           echo "=== READY ==="
           exec env -i PATH="$PATH" HOME="$HOME" bash -c 'while true; do echo "[$(date)] Active"; sleep 300; done'
+
   windows:
     needs: select-os
     if: needs.select-os.outputs.windows != '[]'
@@ -223,15 +228,6 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member "run"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "run"
           $arch = if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -eq 'Arm64') { 'arm64' } else { 'amd64' }
-          $rdTag = '1.5.0'
-          try {
-            $rdFinal = (Invoke-WebRequest -Uri 'https://github.com/rustdesk/rustdesk/releases/latest' -Method Head -UseBasicParsing).BaseResponse.RequestMessage.RequestUri.AbsoluteUri.TrimEnd('/').Split('/')[-1]
-            if ($rdFinal -match '^\d+\.\d+\.\d+$') { $rdTag = $rdFinal }
-          } catch {}
-          $rdArch = if ($arch -eq 'arm64') { 'aarch64' } else { 'x86_64' }
-          $rdSetup = "$env:TEMP\rustdesk-setup.exe"
-          Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/download/$rdTag/rustdesk-$rdTag-$rdArch.exe" -OutFile $rdSetup
-          Start-Process -FilePath $rdSetup -ArgumentList '--silent-install'
           $msi = "$env:TEMP\tailscale.msi"
           try {
             Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-$arch.msi" -OutFile $msi
@@ -262,29 +258,11 @@ jobs:
           if (-not $tsIP) { & $ts status; Get-Service Tailscale -ErrorAction SilentlyContinue | Out-Host; Write-Error "Tailscale IP not assigned"; exit 1 }
           $test = Test-NetConnection -ComputerName $tsIP -Port 3389
           if (-not $test.TcpTestSucceeded) { Write-Error "Port not reachable"; exit 1 }
-          $rd = Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) 'RustDesk\rustdesk.exe'
-          $rdEnd = (Get-Date).AddMinutes(5)
-          while (-not (Test-Path $rd)) { if ((Get-Date) -gt $rdEnd) { Write-Error "RustDesk did not finish installing"; exit 1 }; Start-Sleep -Seconds 3 }
-          $rdEnd = (Get-Date).AddMinutes(5)
-          while ($true) {
-            $rdOut = (& $rd --password $env:RUN_PASSWORD | Out-String)
-            if ($rdOut -match 'Done!') { break }
-            if ((Get-Date) -gt $rdEnd) { Write-Error "RustDesk did not accept the password: $rdOut"; exit 1 }
-            Start-Sleep -Seconds 3
-          }
-          & $rd --option direct-server Y | Out-Null
-          & $rd --option whitelist 100.64.0.0/10 | Out-Null
-          & $rd --option verification-method use-permanent-password | Out-Null
-          & $rd --option approve-mode password | Out-Null
-          netsh advfirewall firewall delete rule name="RustDesk-Tailscale" | Out-Null
-          netsh advfirewall firewall add rule name="RustDesk-Tailscale" dir=in action=allow protocol=TCP localport=21118 remoteip=100.64.0.0/10
-          netsh advfirewall firewall set rule name="RustDesk Service" dir=in new remoteip=100.64.0.0/10
-          $rdEnd = (Get-Date).AddMinutes(2)
-          while (-not (Test-NetConnection -ComputerName $tsIP -Port 21118 -InformationLevel Quiet -WarningAction SilentlyContinue)) { if ((Get-Date) -gt $rdEnd) { Write-Error "RustDesk port 21118 not reachable"; exit 1 }; Start-Sleep -Seconds 3 }
           Write-Host "=== READY ==="
           Remove-Item Env:RUN_PASSWORD, Env:TS_OAUTH_CLIENT_ID, Env:TS_OAUTH_CLIENT_SECRET -ErrorAction SilentlyContinue
           Remove-Variable securePass, tokenBody, tokenResp, keyBody, keyResp -ErrorAction SilentlyContinue
           while ($true) { Write-Host "[$(Get-Date)] Active"; Start-Sleep -Seconds 300 }
+
   macos:
     needs: select-os
     if: needs.select-os.outputs.macos != '[]'
@@ -314,24 +292,14 @@ jobs:
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -users run -privs -all -restart -agent
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          for SERVICE in "kTCCServiceScreenCapture" "kTCCServiceAccessibility" "kTCCServicePostEvent" "kTCCServiceListenEvent"; do
+          for SERVICE in "kTCCServiceScreenCapture" "kTCCServiceAccessibility" "kTCCServicePostEvent"; do
             for CLIENT in "com.apple.RemoteDesktopAgent" "com.apple.screensharing.agent" "com.carriez.rustdesk"; do
               sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('$SERVICE', '$CLIENT', 0, 2, 4, 1);" \
                 || { echo "::error::Could not write the screen-sharing permissions (TCC) - this macOS image may block it"; exit 1; }
             done
           done
-          env -i /usr/bin/caffeinate -dimsu > /dev/null 2>&1 &
-          RD_TAG=$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/rustdesk/rustdesk/releases/latest || true)
-          RD_TAG=${RD_TAG##*/}
-          case "$RD_TAG" in [0-9]*.[0-9]*.[0-9]*) ;; *) RD_TAG=1.5.0 ;; esac
-          case "$(uname -m)" in arm64) RD_ARCH=aarch64 ;; *) RD_ARCH=x86_64 ;; esac
-          curl -fsSL -o /tmp/rustdesk.dmg "https://github.com/rustdesk/rustdesk/releases/download/$RD_TAG/rustdesk-$RD_TAG-$RD_ARCH.dmg" \
-            || { echo "::error::Could not download RustDesk $RD_TAG"; exit 1; }
-          mkdir -p /tmp/rdmnt
-          hdiutil attach /tmp/rustdesk.dmg -nobrowse -quiet -mountpoint /tmp/rdmnt <<< Y
-          sudo ditto /tmp/rdmnt/RustDesk.app /Applications/RustDesk.app
-          hdiutil detach /tmp/rdmnt -quiet
-          open /Applications/RustDesk.app
+          env -i /usr/bin/caffeinate -dimsu &
+          brew install --cask rustdesk
           NODE="gh-${OS_LABEL//./-}-$GITHUB_RUN_ID"
           ACCESS_TOKEN=$(printf 'data = "client_id=%s&client_secret=%s"\n' "$TS_OAUTH_CLIENT_ID" "$TS_OAUTH_CLIENT_SECRET" \
             | curl -fsS -K - "https://api.tailscale.com/api/v2/oauth/token" \
@@ -351,26 +319,5 @@ jobs:
           sudo tailscale up --authkey="$TS_KEY" --hostname="$NODE" --timeout=120s
           TS_IP=$(tailscale ip -4 2>/dev/null || true)
           if [ -z "$TS_IP" ]; then echo "::error::Tailscale IP not assigned"; exit 1; fi
-          RD=/Applications/RustDesk.app/Contents/MacOS/RustDesk
-          for i in $(seq 1 100); do
-            RD_OUT=$(sudo "$RD" --password "$RUN_PASSWORD" 2>&1 || true)
-            case "$RD_OUT" in *Done!*) break ;; esac
-            sleep 3
-          done
-          case "$RD_OUT" in *Done!*) ;; *) echo "::error::RustDesk did not accept the password: $RD_OUT"; exit 1 ;; esac
-          sudo "$RD" --option direct-server Y
-          sudo "$RD" --option whitelist 100.64.0.0/10
-          sudo "$RD" --option verification-method use-permanent-password
-          sudo "$RD" --option approve-mode password
-          RD_UP=no
-          for i in $(seq 1 30); do if (echo > "/dev/tcp/$TS_IP/21118") 2>/dev/null; then RD_UP=yes; break; fi; sleep 2; done
-          if [ "$RD_UP" != yes ]; then echo "::error::RustDesk port 21118 not reachable"; exit 1; fi
-          SCREEN_USER=$(stat -f%Su /dev/console || true)
-          if [ -z "$SCREEN_USER" ] || [ "$SCREEN_USER" = root ]; then SCREEN_USER=$(id -un); fi
-          if sudo dscl . -passwd "/Users/$SCREEN_USER" "$RUN_PASSWORD" && sudo dscl . -authonly "$SCREEN_USER" "$RUN_PASSWORD"; then
-            echo "The account on screen ($SCREEN_USER) now uses the same password as run"
-          else
-            echo "::warning::Could not set the password of the account on screen ($SCREEN_USER). In password boxes type run as the name and your password"
-          fi
           echo "=== READY ==="
           exec env -i PATH="$PATH" HOME="$HOME" bash -c 'while true; do echo "[$(date)] Active"; sleep 300; done'
